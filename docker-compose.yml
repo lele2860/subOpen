@@ -13,7 +13,7 @@ services:
       - "/etc/subscription-gate/gate.conf"
     volumes:
       - "${GATE_CONFIG:-./config/gate.conf}:/etc/subscription-gate/gate.conf:ro"
-      - "${SUBSCRIPTION_FILE:-/var/www/mihomo/config.yaml}:/data/config.yaml:ro"
+      - "${SUBSCRIPTION_DIR:-/var/www/mihomo}:/data"
     read_only: true
     tmpfs:
       - /tmp
@@ -31,3 +31,4 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
+
