@@ -3,8 +3,8 @@
 
 The subscription URL is fixed and intentionally has no query-string token.
 The service exposes the public filename only while access is active. When the
-window closes, the public filename is removed and the file remains under a
-hidden filename.
+window closes, the public filename is removed and the file remains under the
+configured locked filename.
 """
 
 from __future__ import annotations
