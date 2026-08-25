@@ -1,0 +1,33 @@
+services:
+  subscription-gate:
+    build:
+      context: .
+    image: subscription-gate:local
+    container_name: subscription-gate
+    restart: unless-stopped
+    user: "33:33"
+    ports:
+      - "127.0.0.1:18080:8080"
+    command:
+      - "--config"
+      - "/etc/subscription-gate/gate.conf"
+    volumes:
+      - "${GATE_CONFIG:-./config/gate.conf}:/etc/subscription-gate/gate.conf:ro"
+      - "${SUBSCRIPTION_FILE:-/var/www/mihomo/config.yaml}:/data/config.yaml:ro"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
