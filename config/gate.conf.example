@@ -2,7 +2,7 @@
 # Never commit config/gate.conf.
 PASSWORD=replace-with-a-long-random-password
 FILE_PATH=/data/config.yaml
-LOCKED_FILE_PATH=/data/config.yaml1
+LOCKED_FILE_PATH=/data/config.yaml.disabled
 SUB_PATH=/sub/replace-with-your-subscription-path
 BIND=0.0.0.0
 PORT=8080
