@@ -1,13 +1,27 @@
-# 临时订阅访问控制 Docker 部署
+# 固定订阅链接临时访问控制
 
-这是一个轻量的 Python 标准库服务，用密码开启一个配置文件的临时访问链接。
+这是一个轻量的 Python 标准库服务，用密码控制一个固定订阅链接的临时访问。
 
-- 同一个配置文件始终使用同一个 LINK_TOKEN
-- 密码验证成功后，链接开启 10 分钟
-- 页面显示倒计时，并支持提前关闭
-- 到期或关闭后，链接返回 HTTP 403
-- 后端只通过 Docker 映射到本机 127.0.0.1:18080
+- 订阅链接固定不变，不带 `?token=...`
+- 密码验证成功后，公开文件名出现，链接开启 10 分钟
+- 到期或点击“提前关闭”后，公开文件名消失，链接返回 HTTP 404
+- 真正的订阅文件保存在隐藏文件名下，更新文件内容时不需要更换订阅地址
+- 后端只通过 Docker 映射到本机 `127.0.0.1:18080`
 - 不需要 Python 第三方依赖
+
+## 工作方式
+
+例如配置如下：
+
+~~~ini
+FILE_PATH=/data/config.yaml
+LOCKED_FILE_PATH=/data/.config.yaml
+SUB_PATH=/sub/你的固定订阅路径
+~~~
+
+服务启动时会把 `config.yaml` 隐藏为 `.config.yaml`。密码验证成功后，在同一目录创建临时的 `config.yaml` 公开号名；10 分钟到期或手动关闭后删除这个公开号名。实际内容始终来自隐藏文件，因此订阅内容可以直接更新，客户端不需要更换链接。
+
+固定链接没有单独的 token。也就是说，只要有人知道这个固定链接，就可以在当前 10 分钟窗口内访问；这是“不使用 token”带来的行为。
 
 ## 目录结构
 
@@ -24,13 +38,13 @@
 
 ## 安全说明
 
-不要把真实的 config/gate.conf 提交到 GitHub。该文件包含访问密码和固定链接令牌，仓库只提供 gate.conf.example。
+不要把真实的 `config/gate.conf` 提交到 GitHub。该文件包含访问密码，仓库只提供示例配置。
 
-当前服务没有公网改密接口。修改密码应通过 SSH 编辑服务器上的 config/gate.conf，然后重启容器。修改密码时不要修改 LINK_TOKEN，否则订阅客户端保存的链接也会改变。
+当前服务没有公网改密接口。修改密码应通过 SSH 编辑服务器上的配置文件，然后重启服务。
 
 ## 在现有服务器上迁移到 Docker
 
-下面的步骤适用于当前 Nginx 已经代理 127.0.0.1:18080 的服务器。
+下面的步骤适用于 Nginx 已经代理 `127.0.0.1:18080` 的服务器。
 
 ### 1. 获取项目
 
@@ -39,63 +53,64 @@ git clone https://github.com/lele2860/subOpen.git /opt/subscription-gate
 cd /opt/subscription-gate
 ~~~
 
-### 2. 从现有 systemd 服务迁移配置
+### 2. 准备订阅目录
 
-这一步会保留现有密码、固定链接令牌和订阅路径，不要把生成后的配置提交到 Git。
+服务需要在订阅目录内创建、删除临时公开文件名，因此目录必须允许容器内的 `www-data`（UID/GID 33）写入。下面以当前目录 `/var/www/mihomo` 为例：
+
+~~~bash
+systemctl stop subscription-gate
+
+# 只在隐藏文件还不存在时执行，避免覆盖已有文件
+test ! -e /var/www/mihomo/.config.yaml
+mv /var/www/mihomo/config.yaml /var/www/mihomo/.config.yaml
+
+chown root:www-data /var/www/mihomo /var/www/mihomo/.config.yaml
+chmod 775 /var/www/mihomo
+chmod 640 /var/www/mihomo/.config.yaml
+~~~
+
+### 3. 创建 Docker 配置
 
 ~~~bash
 mkdir -p config
-cp /etc/subscription-gate/gate.conf config/gate.conf
+cp config/gate.conf.example config/gate.conf
 sed -i \
+  -e 's#^PASSWORD=.*#PASSWORD=替换为你的访问密码#' \
   -e 's#^FILE_PATH=.*#FILE_PATH=/data/config.yaml#' \
-  -e 's#^BIND=.*#BIND=0.0.0.0#' \
-  -e 's#^PORT=.*#PORT=8080#' \
+  -e 's#^LOCKED_FILE_PATH=.*#LOCKED_FILE_PATH=/data/.config.yaml#' \
+  -e 's#^SUB_PATH=.*#SUB_PATH=/sub/你的固定订阅路径#' \
   config/gate.conf
 chmod 640 config/gate.conf
 ~~~
 
-确认配置里至少包含：
+确认配置至少包含：
 
 ~~~ini
-PASSWORD=原来的访问密码
-LINK_TOKEN=原来的固定链接令牌
+PASSWORD=你的访问密码
 FILE_PATH=/data/config.yaml
-SUB_PATH=/sub/你的订阅路径
+LOCKED_FILE_PATH=/data/.config.yaml
+SUB_PATH=/sub/你的固定订阅路径
 BIND=0.0.0.0
 PORT=8080
 TTL_SECONDS=600
 ~~~
 
-确认订阅文件可被容器内的 www-data 读取：
-
-~~~bash
-stat -c '%a %U:%G' /var/www/mihomo/config.yaml
-~~~
-
-如果文件是 root:www-data 且权限为 640，可以直接使用；如果是 600 root:root，需要调整为：
-
-~~~bash
-chown root:www-data /var/www/mihomo/config.yaml
-chmod 640 /var/www/mihomo/config.yaml
-~~~
-
-### 3. 停止旧服务并启动 Docker
+### 4. 启动 Docker
 
 旧 systemd 服务和 Docker 不能同时占用 18080 端口：
 
 ~~~bash
-systemctl disable --now subscription-gate
 docker compose up -d --build
 docker compose ps
 docker compose logs --tail=50 subscription-gate
 curl -sS http://127.0.0.1:18080/healthz
 ~~~
 
-看到 ok 即表示容器后端正常。
+看到 `ok` 即表示后端正常。
 
-### 4. 配置 Nginx
+### 5. 配置 Nginx
 
-Nginx HTTPS server 中需要包含 deploy/nginx-subscription.conf.example 的三个 location，并将最后一个 location 的路径替换成 gate.conf 中的 SUB_PATH。
+HTTPS server 中需要包含 `deploy/nginx-subscription.conf.example` 的三个 location，并将最后一个 location 的路径替换成 `gate.conf` 中的 `SUB_PATH`。
 
 必须删除或替换原来直接暴露订阅文件的配置，例如：
 
@@ -116,56 +131,61 @@ systemctl reload nginx
 https://你的域名/sub-access/
 ~~~
 
-输入密码后复制临时链接到订阅客户端。以后重新输入密码会重新开启同一个链接，不需要在客户端更换订阅地址。
+输入密码后复制固定订阅链接到订阅客户端。链接中不会出现 `token=`，以后重新输入密码仍然使用同一个地址。
 
 ## 新环境部署
 
 ~~~bash
+git clone https://github.com/lele2860/subOpen.git /opt/subscription-gate
+cd /opt/subscription-gate
+mkdir -p data config
+cp /path/to/config.yaml data/.config.yaml
+chown -R 33:33 data
+chmod 770 data
+chmod 640 data/.config.yaml
 cp config/gate.conf.example config/gate.conf
-mkdir -p data
-cp /path/to/config.yaml data/config.yaml
 ~~~
 
-编辑 config/gate.conf：
+编辑 `config/gate.conf`：
 
 ~~~ini
 PASSWORD=请替换为随机密码
-LINK_TOKEN=请替换为至少 32 位随机令牌
 FILE_PATH=/data/config.yaml
-SUB_PATH=/sub/你的订阅路径
+LOCKED_FILE_PATH=/data/.config.yaml
+SUB_PATH=/sub/你的固定订阅路径
 BIND=0.0.0.0
 PORT=8080
 TTL_SECONDS=600
 ~~~
 
-可用 OpenSSL 生成随机值：
-
-~~~bash
-openssl rand -hex 24
-~~~
-
 启动：
 
 ~~~bash
-SUBSCRIPTION_FILE="$PWD/data/config.yaml" docker compose up -d --build
+docker compose up -d --build
 ~~~
 
 ## 修改密码
 
-服务器上编辑：
+服务器上编辑配置文件：
 
 ~~~bash
 nano /opt/subscription-gate/config/gate.conf
 ~~~
 
-只修改 PASSWORD，然后：
+只修改 `PASSWORD`，然后重启服务：
 
 ~~~bash
-cd /opt/subscription-gate
 docker compose restart subscription-gate
 ~~~
 
-重启会让当前已开启的 10 分钟访问立即失效，但不会改变固定订阅链接。
+重启会关闭当前订阅访问，但不会改变固定订阅链接。
+
+如果当前使用的是 systemd：
+
+~~~bash
+nano /etc/subscription-gate/gate.conf
+systemctl restart subscription-gate
+~~~
 
 ## 回滚到 systemd
 
@@ -174,16 +194,18 @@ docker compose down
 systemctl enable --now subscription-gate
 ~~~
 
-Nginx 仍使用 127.0.0.1:18080，通常不需要修改 Nginx 配置。
+Nginx 仍使用 `127.0.0.1:18080`，通常不需要修改 Nginx 配置。
 
 ## API
 
 ~~~text
 POST /sub-access/api/login
 body: {"password":"..."}
+返回的 url 是固定的 SUB_PATH，不带 token
 
 POST /sub-access/api/revoke
-body: {"token":"..."}
+无需请求体
 ~~~
 
 没有公网修改密码 API；密码修改应通过 SSH 或受控的服务器配置管理流程完成。
+
