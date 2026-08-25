@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import hmac
-import html
 import json
 import os
 import sys
