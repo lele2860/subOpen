@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Temporary password-gated subscription access service.
 
-The service deliberately keeps the subscription file outside of the public
-filesystem route. Nginx proxies only the login page/API and the legacy
-subscription path to this loopback-only service.
+The subscription URL is fixed and intentionally has no query-string token.
+The service exposes the public filename only while access is active. When the
+window closes, the public filename is removed and the file remains under a
+hidden filename.
 """
 
 from __future__ import annotations
@@ -12,12 +13,13 @@ import argparse
 import hmac
 import html
 import json
+import os
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import urlsplit
 
 
 MAX_BODY_BYTES = 64 * 1024
@@ -59,7 +61,7 @@ HTML_PAGE = """<!doctype html>
 <body>
 <main>
   <h1>订阅临时访问</h1>
-  <p>输入访问密码后开启此配置文件的临时订阅链接，有效期 10 分钟。链接到期后会自动失效，也可以提前关闭。</p>
+  <p>输入访问密码后开启固定订阅链接，有效期 10 分钟。链接到期后会自动失效，也可以提前关闭。</p>
   <form id="unlock-form">
     <label for="password">访问密码</label>
     <input id="password" name="password" type="password" autocomplete="current-password" required>
@@ -87,7 +89,7 @@ HTML_PAGE = """<!doctype html>
   const link = document.getElementById("subscription-link");
   const copyButton = document.getElementById("copy-button");
   const closeButton = document.getElementById("close-button");
-  let token = "";
+  let subscriptionUrl = "";
   let expiresAt = 0;
   let timer = 0;
 
@@ -105,7 +107,7 @@ HTML_PAGE = """<!doctype html>
   function closeLocal(text) {
     if (timer) window.clearInterval(timer);
     timer = 0;
-    token = "";
+    subscriptionUrl = "";
     countdown.textContent = "00:00";
     link.removeAttribute("href");
     link.textContent = text || "访问链接已关闭";
@@ -134,9 +136,9 @@ HTML_PAGE = """<!doctype html>
       });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || "密码错误");
-      token = data.token;
       expiresAt = data.expires_at * 1000;
-      link.href = new URL(data.url, window.location.origin).href;
+      subscriptionUrl = new URL(data.url, window.location.origin).href;
+      link.href = subscriptionUrl;
       link.textContent = link.href;
       panel.classList.remove("hidden");
       password.value = "";
@@ -154,9 +156,9 @@ HTML_PAGE = """<!doctype html>
   });
 
   copyButton.addEventListener("click", async () => {
-    if (!link.href || !token) return;
+    if (!subscriptionUrl) return;
     try {
-      await navigator.clipboard.writeText(link.href);
+      await navigator.clipboard.writeText(subscriptionUrl);
       setMessage("临时链接已复制。", false);
     } catch {
       setMessage("浏览器不允许自动复制，请手动复制上方链接。", true);
@@ -164,13 +166,10 @@ HTML_PAGE = """<!doctype html>
   });
 
   closeButton.addEventListener("click", async () => {
-    if (!token) return;
     closeButton.disabled = true;
     try {
       const response = await fetch("/sub-access/api/revoke", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token })
       });
       if (!response.ok) throw new Error("关闭请求失败");
       closeLocal("访问链接已提前关闭");
@@ -195,14 +194,28 @@ def load_config(path: str) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip()
-    required = ("PASSWORD", "LINK_TOKEN", "FILE_PATH", "SUB_PATH", "BIND", "PORT", "TTL_SECONDS")
+    required = (
+        "PASSWORD",
+        "FILE_PATH",
+        "LOCKED_FILE_PATH",
+        "SUB_PATH",
+        "BIND",
+        "PORT",
+        "TTL_SECONDS",
+    )
     missing = [key for key in required if not values.get(key)]
     if missing:
         raise RuntimeError("missing config keys: " + ", ".join(missing))
     if not values["SUB_PATH"].startswith("/") or ".." in values["SUB_PATH"]:
         raise RuntimeError("invalid SUB_PATH")
-    if len(values["LINK_TOKEN"]) < 32:
-        raise RuntimeError("LINK_TOKEN is too short")
+    public_path = Path(values["FILE_PATH"])
+    locked_path = Path(values["LOCKED_FILE_PATH"])
+    if not public_path.is_absolute() or not locked_path.is_absolute():
+        raise RuntimeError("FILE_PATH and LOCKED_FILE_PATH must be absolute")
+    if os.path.abspath(public_path) == os.path.abspath(locked_path):
+        raise RuntimeError("FILE_PATH and LOCKED_FILE_PATH must be different")
+    if public_path.parent != locked_path.parent:
+        raise RuntimeError("FILE_PATH and LOCKED_FILE_PATH must share a directory")
     int(values["PORT"])
     int(values["TTL_SECONDS"])
     return values
@@ -216,37 +229,115 @@ class GateServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.config = config
         self.active_until = 0.0
-        self.token_lock = threading.Lock()
+        self.state_lock = threading.RLock()
+        self.stop_expiry = threading.Event()
         self.failed_attempts: dict[str, tuple[int, float]] = {}
         self.failed_lock = threading.Lock()
+        with self.state_lock:
+            self.lock_file()
+        self.expiry_thread = threading.Thread(target=self.expiry_loop, name="subscription-expiry", daemon=True)
+        self.expiry_thread.start()
 
-    def purge_expired(self, now: float | None = None) -> None:
+    @property
+    def public_path(self) -> Path:
+        return Path(self.config["FILE_PATH"])
+
+    @property
+    def locked_path(self) -> Path:
+        return Path(self.config["LOCKED_FILE_PATH"])
+
+    @staticmethod
+    def path_exists(path: Path) -> bool:
+        return path.exists() or path.is_symlink()
+
+    def lock_file(self) -> None:
+        """Hide the public filename while access is not active.
+
+        The real file stays under LOCKED_FILE_PATH while access is closed.
+        During an active window it is moved to FILE_PATH, and it is moved back
+        when the window closes.
+        """
+        public = self.public_path
+        locked = self.locked_path
+        if public.is_symlink():
+            public.unlink()
+        if public.exists():
+            if self.path_exists(locked):
+                raise RuntimeError("both FILE_PATH and LOCKED_FILE_PATH exist")
+            os.replace(public, locked)
+        if not locked.is_file():
+            raise RuntimeError("locked subscription file is missing")
+
+    def expose_file(self) -> None:
+        public = self.public_path
+        locked = self.locked_path
+        if public.exists() and not self.path_exists(locked):
+            return
+        if public.is_symlink():
+            public.unlink()
+        if public.exists():
+            raise RuntimeError("public subscription filename is already occupied")
+        if not locked.is_file():
+            raise RuntimeError("locked subscription file is missing")
+        os.replace(locked, public)
+
+    def hide_file(self) -> None:
+        public = self.public_path
+        locked = self.locked_path
+        if public.is_symlink():
+            public.unlink()
+            return
+        if public.exists():
+            if self.path_exists(locked):
+                raise RuntimeError("both FILE_PATH and LOCKED_FILE_PATH exist")
+            os.replace(public, locked)
+
+    def expire_if_due(self, now: float | None = None) -> None:
         now = now or time.time()
-        with self.token_lock:
-            if self.active_until and self.active_until <= now:
-                self.active_until = 0.0
-
-    def issue_token(self) -> tuple[str, int]:
-        now = time.time()
-        expires = now + int(self.config["TTL_SECONDS"])
-        with self.token_lock:
-            self.active_until = expires
-        return self.config["LINK_TOKEN"], int(expires)
-
-    def valid_token(self, token: str) -> bool:
-        self.purge_expired()
-        if not hmac.compare_digest(token, self.config["LINK_TOKEN"]):
-            return False
-        with self.token_lock:
-            return self.active_until > time.time()
-
-    def revoke_token(self, token: str) -> bool:
-        if not hmac.compare_digest(token, self.config["LINK_TOKEN"]):
-            return False
-        with self.token_lock:
-            was_active = self.active_until > time.time()
+        if self.active_until and self.active_until <= now:
             self.active_until = 0.0
+            try:
+                self.hide_file()
+            except OSError as exc:
+                sys.stderr.write("cannot hide expired subscription file: %s\n" % exc)
+
+    def issue_access(self) -> int:
+        with self.state_lock:
+            self.expire_if_due()
+            self.expose_file()
+            expires = int(time.time()) + int(self.config["TTL_SECONDS"])
+            self.active_until = float(expires)
+            return expires
+
+    def access_active(self) -> bool:
+        with self.state_lock:
+            self.expire_if_due()
+            return self.active_until > time.time() and self.public_path.is_file()
+
+    def revoke_access(self) -> bool:
+        with self.state_lock:
+            was_active = self.active_until > time.time() or self.public_path.is_file()
+            self.active_until = 0.0
+            self.hide_file()
             return was_active
+
+    def expiry_loop(self) -> None:
+        while not self.stop_expiry.wait(0.5):
+            with self.state_lock:
+                should_hide = bool(self.active_until and self.active_until <= time.time())
+                if should_hide:
+                    self.active_until = 0.0
+                if should_hide or (not self.active_until and self.path_exists(self.public_path)):
+                    try:
+                        self.hide_file()
+                    except OSError as exc:
+                        sys.stderr.write("cannot hide subscription file: %s\n" % exc)
+
+    def server_close(self) -> None:
+        self.stop_expiry.set()
+        if hasattr(self, "expiry_thread"):
+            self.expiry_thread.join(timeout=2)
+        super().server_close()
 
     def verify_password(self, candidate: str) -> bool:
         return hmac.compare_digest(candidate, self.config["PASSWORD"])
@@ -344,17 +435,14 @@ class Handler(BaseHTTPRequestHandler):
         body = HTML_PAGE.encode("utf-8")
         self.send_response_body(200, body, "text/html; charset=utf-8", head_only=head_only)
 
-    def serve_subscription(self, token: str, head_only: bool = False) -> None:
-        if not token:
-            self.send_response_body(401, b"subscription access is locked\n")
-            return
-        if not self.server.valid_token(token):
-            self.send_response_body(403, b"subscription link is invalid or expired\n")
+    def serve_subscription(self, head_only: bool = False) -> None:
+        if not self.server.access_active():
+            self.send_response_body(404, b"subscription file not found\n")
             return
         try:
-            body = Path(self.server.config["FILE_PATH"]).read_bytes()
+            body = self.server.public_path.read_bytes()
         except OSError:
-            self.send_response_body(503, b"subscription file is temporarily unavailable\n")
+            self.send_response_body(404, b"subscription file not found\n")
             return
         self.send_response_body(
             200,
@@ -374,8 +462,7 @@ class Handler(BaseHTTPRequestHandler):
             self.serve_login_page(head_only)
             return
         if path == self.server.config["SUB_PATH"]:
-            token = parse_qs(parsed.query).get("token", [""])[0]
-            self.serve_subscription(token, head_only)
+            self.serve_subscription(head_only)
             return
         if path == "/healthz":
             self.send_response_body(200, b"ok\n", head_only=head_only)
@@ -405,27 +492,29 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(401, {"ok": False, "error": "密码错误"})
                 return
             self.server.clear_failures(client_ip)
-            token, expires_at = self.server.issue_token()
-            url = self.server.config["SUB_PATH"] + "?token=" + quote(token, safe="")
+            try:
+                expires_at = self.server.issue_access()
+            except (OSError, RuntimeError) as exc:
+                sys.stderr.write("cannot expose subscription file: %s\n" % exc)
+                self.send_json(503, {"ok": False, "error": "订阅文件暂时无法开启"})
+                return
             self.send_json(
                 200,
                 {
                     "ok": True,
-                    "token": token,
                     "expires_at": expires_at,
                     "ttl_seconds": int(self.server.config["TTL_SECONDS"]),
-                    "url": url,
+                    "url": self.server.config["SUB_PATH"],
                 },
             )
             return
 
         if path == "/sub-access/api/revoke":
-            token = payload.get("token", "")
-            if not isinstance(token, str) or not token or len(token) > 256:
-                self.send_json(400, {"ok": False, "error": "临时链接无效"})
-                return
-            if not self.server.revoke_token(token):
-                self.send_json(404, {"ok": False, "error": "链接已失效"})
+            try:
+                self.server.revoke_access()
+            except (OSError, RuntimeError) as exc:
+                sys.stderr.write("cannot hide subscription file: %s\n" % exc)
+                self.send_json(503, {"ok": False, "error": "订阅文件暂时无法关闭"})
                 return
             self.send_json(200, {"ok": True})
             return
@@ -463,3 +552,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
