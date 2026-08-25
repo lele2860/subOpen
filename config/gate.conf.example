@@ -1,0 +1,9 @@
+# Copy this file to config/gate.conf and edit it.
+# Never commit config/gate.conf.
+PASSWORD=replace-with-a-long-random-password
+LINK_TOKEN=replace-with-at-least-32-random-url-safe-characters
+FILE_PATH=/data/config.yaml
+SUB_PATH=/sub/replace-with-your-subscription-path
+BIND=0.0.0.0
+PORT=8080
+TTL_SECONDS=600
