@@ -5,7 +5,7 @@
 - 订阅链接固定不变，不带 `?token=...`
 - 密码验证成功后，公开文件名出现，链接开启 10 分钟
 - 到期或点击“提前关闭”后，公开文件名消失，链接返回 HTTP 404
-- 关闭时使用可见文件名 `config.yaml1`，更新文件内容时不需要更换订阅地址
+- 关闭时使用可见文件名 `config.yaml.disabled`，更新文件内容时不需要更换订阅地址
 - 后端只通过 Docker 映射到本机 `127.0.0.1:18080`
 - 不需要 Python 第三方依赖
 
@@ -15,11 +15,11 @@
 
 ~~~ini
 FILE_PATH=/data/config.yaml
-LOCKED_FILE_PATH=/data/config.yaml1
+LOCKED_FILE_PATH=/data/config.yaml.disabled
 SUB_PATH=/sub/你的固定订阅路径
 ~~~
 
-关闭访问时文件名为 `config.yaml1`。密码验证成功后，同一个文件临时改名为 `config.yaml`；10 分钟到期或手动关闭后再改回 `config.yaml1`。两个文件名都能在 Xftp 中直接看到。
+关闭访问时文件名为 `config.yaml.disabled`。密码验证成功后，同一个文件临时改名为 `config.yaml`；10 分钟到期或手动关闭后再改回 `config.yaml.disabled`。两个文件名都能在 Xftp 中直接看到。
 
 固定链接没有单独的 token。也就是说，只要有人知道这个固定链接，就可以在当前 10 分钟窗口内访问；这是“不使用 token”带来的行为。
 
@@ -60,13 +60,13 @@ cd /opt/subscription-gate
 ~~~bash
 systemctl stop subscription-gate
 
-# 只在 config.yaml1 还不存在时执行，避免覆盖已有文件
-test ! -e /var/www/mihomo/config.yaml1
-mv /var/www/mihomo/config.yaml /var/www/mihomo/config.yaml1
+# 只在 config.yaml.disabled 还不存在时执行，避免覆盖已有文件
+test ! -e /var/www/mihomo/config.yaml.disabled
+mv /var/www/mihomo/config.yaml /var/www/mihomo/config.yaml.disabled
 
-chown root:www-data /var/www/mihomo /var/www/mihomo/config.yaml1
+chown root:www-data /var/www/mihomo /var/www/mihomo/config.yaml.disabled
 chmod 775 /var/www/mihomo
-chmod 640 /var/www/mihomo/config.yaml1
+chmod 640 /var/www/mihomo/config.yaml.disabled
 ~~~
 
 ### 3. 创建 Docker 配置
@@ -77,7 +77,7 @@ cp config/gate.conf.example config/gate.conf
 sed -i \
   -e 's#^PASSWORD=.*#PASSWORD=替换为你的访问密码#' \
   -e 's#^FILE_PATH=.*#FILE_PATH=/data/config.yaml#' \
-  -e 's#^LOCKED_FILE_PATH=.*#LOCKED_FILE_PATH=/data/config.yaml1#' \
+  -e 's#^LOCKED_FILE_PATH=.*#LOCKED_FILE_PATH=/data/config.yaml.disabled#' \
   -e 's#^SUB_PATH=.*#SUB_PATH=/sub/你的固定订阅路径#' \
   config/gate.conf
 chmod 640 config/gate.conf
@@ -88,7 +88,7 @@ chmod 640 config/gate.conf
 ~~~ini
 PASSWORD=你的访问密码
 FILE_PATH=/data/config.yaml
-LOCKED_FILE_PATH=/data/config.yaml1
+LOCKED_FILE_PATH=/data/config.yaml.disabled
 SUB_PATH=/sub/你的固定订阅路径
 BIND=0.0.0.0
 PORT=8080
@@ -139,10 +139,10 @@ https://你的域名/sub-access/
 git clone https://github.com/lele2860/subOpen.git /opt/subscription-gate
 cd /opt/subscription-gate
 mkdir -p data config
-cp /path/to/config.yaml data/config.yaml1
+cp /path/to/config.yaml data/config.yaml.disabled
 chown -R 33:33 data
 chmod 770 data
-chmod 640 data/config.yaml1
+chmod 640 data/config.yaml.disabled
 cp config/gate.conf.example config/gate.conf
 ~~~
 
@@ -151,7 +151,7 @@ cp config/gate.conf.example config/gate.conf
 ~~~ini
 PASSWORD=请替换为随机密码
 FILE_PATH=/data/config.yaml
-LOCKED_FILE_PATH=/data/config.yaml1
+LOCKED_FILE_PATH=/data/config.yaml.disabled
 SUB_PATH=/sub/你的固定订阅路径
 BIND=0.0.0.0
 PORT=8080
