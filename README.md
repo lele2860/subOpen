@@ -133,6 +133,8 @@ https://你的域名/sub-access/
 
 输入密码后复制固定订阅链接到订阅客户端。链接中不会出现 `token=`，以后重新输入密码仍然使用同一个地址。
 
+登录成功后，页面下方会显示在线 YAML 编辑器。可以直接修改订阅内容并点击“保存配置”；保存接口只接受当前密码会话，并且只在 10 分钟访问窗口内可用。编辑会话使用 HttpOnly Cookie，不会出现在订阅链接中。
+
 ## 新环境部署
 
 ~~~bash
@@ -203,8 +205,15 @@ POST /sub-access/api/login
 body: {"password":"..."}
 返回的 url 是固定的 SUB_PATH，不带 token
 
+GET /sub-access/api/file
+读取当前订阅内容，需要登录后的浏览器会话
+
+POST /sub-access/api/file
+body: {"content":"..."}
+保存订阅内容，最大 2 MB，需要登录后的浏览器会话
+
 POST /sub-access/api/revoke
-无需请求体
+无需请求体，需要登录后的浏览器会话
 ~~~
 
 没有公网修改密码 API；密码修改应通过 SSH 或受控的服务器配置管理流程完成。
